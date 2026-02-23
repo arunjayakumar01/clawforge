@@ -1,6 +1,6 @@
-# ClawForge — Enterprise Governance for OpenClaw
+# ClawForge — One Dashboard for All Your AI Assistants
 
-ClawForge adds enterprise admin capabilities to OpenClaw: SSO authentication, org-level policy enforcement, tool & skill allowlisting, audit trails, and a remote kill switch — all managed through a web admin console.
+ClawForge is the admin layer for [OpenClaw](https://github.com/openclaw/openclaw). It gives you a single control plane to manage authentication, policies, tool and skill governance, audit trails, and a remote kill switch — whether you're a team or a power user running multiple gateways.
 
 ## Architecture
 
@@ -25,70 +25,104 @@ ClawForge adds enterprise admin capabilities to OpenClaw: SSO authentication, or
 
 ## Features
 
-### ✅ SSO / OIDC Authentication
-- Authorization Code flow with PKCE
+### Authentication
+- Email/password login with seed-generated admin user
+- Enrollment tokens for onboarding new users
+- SSO / OIDC (Authorization Code with PKCE) — Okta, Auth0, Entra ID, etc.
 - Token exchange, refresh, and session management
+- Self-service password change
 - First user in an org auto-promoted to admin
 - `/clawforge-login` command in OpenClaw
 
-### ✅ Org Policy Management
+### Org Policy Management
 - Tool allow/deny lists and enforcement profiles
 - Skill approval workflows (org-wide or per-user scope)
 - Audit level configuration (full / metadata / off)
 - Versioned policies with optimistic caching
 
-### ✅ Tool Enforcement
+### Tool Enforcement
 - `before_tool_call` hook blocks disallowed tools
 - Allow/deny list matching with profile-based overrides
 - Blocked calls logged to audit trail
 
-### ✅ Skill Governance
+### Skill Governance
 - `/clawforge-submit` command packages and submits skills
 - Automated security scanning (file count, critical/warn/info findings)
 - Admin review workflow: approve (org/self scope) or reject with notes
 - Only approved skills loaded into the gateway
 
-### ✅ Audit Logging
+### Audit Logging
 - Batched async event ingestion to control plane
 - Configurable levels: `full` (includes LLM I/O), `metadata`, `off`
 - Events: tool calls, session lifecycle, LLM input/output, policy changes
 - Queryable by user, event type, tool, outcome, time range
 
-### ✅ Kill Switch
+### Kill Switch
 - Instant remote disable of all tool calls
 - Heartbeat polling with configurable interval and failure threshold
 - Custom message displayed to users when active
 - Admin toggle in web console
 
-### ✅ `/clawforge-status` Command
+### `/clawforge-status` Command
 - Shows auth state, org, policy version, kill switch status, audit level
 
 ## Quick Start
 
-### Prerequisites
+### Option A: Docker (Recommended)
 
-- Node.js ≥ 22
-- PostgreSQL ≥ 15
-- pnpm
-- An OIDC provider (Okta, Auth0, Entra ID, etc.)
-
-### 1. Database Setup
+The fastest way to get running. One command starts Postgres, runs migrations, seeds an admin user, and launches both the server and admin console.
 
 ```bash
-# Create the database
-createdb clawforge
-
-# Run migrations
-cd server
-pnpm db:migrate
+git clone https://github.com/openclaw/clawforge.git
+cd clawforge
+docker compose up --build
 ```
 
-### 2. Start the Control Plane
+Once running:
+
+- **Server API:** http://localhost:4100
+- **Admin Console:** http://localhost:4200
+- **Default login:** `admin@clawforge.local` / `clawforge`
+
+To customize the default admin credentials:
+
+```bash
+SUPERADMIN_EMAIL=admin@example.com SUPERADMIN_PASSWORD=s3cure \
+  docker compose up --build
+```
+
+### Option B: Manual Setup
+
+#### Prerequisites
+
+- Node.js >= 22
+- PostgreSQL >= 15
+- pnpm
+
+#### 1. Database Setup
+
+```bash
+createdb clawforge
+
+cd server
+pnpm install
+pnpm db:migrate
+pnpm db:seed  # Creates default org + admin user
+```
+
+The seed creates a superadmin you can log in with immediately. Customize with env vars:
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUPERADMIN_EMAIL` | `admin@clawforge.local` | Admin email |
+| `SUPERADMIN_PASSWORD` | `clawforge` | Admin password |
+| `SUPERADMIN_ORG_NAME` | `Default` | Organization name |
+
+#### 2. Start the Control Plane
 
 ```bash
 cd server
 
-# Required env vars
 export DATABASE_URL="postgresql://localhost:5432/clawforge"
 export JWT_SECRET="your-secret-here"  # Change in production!
 export CORS_ORIGIN="http://localhost:4200"
@@ -102,12 +136,11 @@ pnpm build && pnpm start
 
 The API starts on `http://localhost:4100`. Health check: `GET /health`.
 
-### 3. Start the Admin Console
+#### 3. Start the Admin Console
 
 ```bash
 cd admin
 
-# Point to the control plane
 export NEXT_PUBLIC_API_URL="http://localhost:4100"
 
 # Development
@@ -119,9 +152,32 @@ pnpm build && pnpm start
 
 The admin UI is available at `http://localhost:4200`.
 
-### 4. Configure the OpenClaw Extension
+#### 4. Log In
 
-Add ClawForge to your OpenClaw config (`openclaw.json`):
+With the seeded admin user:
+
+```bash
+curl -X POST http://localhost:4100/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@clawforge.local", "password": "clawforge", "orgId": "<ORG_ID>"}'
+```
+
+The org ID is printed during seed output.
+
+### Configure SSO (Optional)
+
+SSO is not required for getting started. To add OIDC authentication alongside email/password:
+
+1. Register an OIDC application with your IdP
+2. Add SSO config to your org record:
+
+```sql
+UPDATE organizations
+SET sso_config = '{"issuerUrl": "https://your-idp.example.com", "clientId": "your-client-id"}'
+WHERE name = 'Default';
+```
+
+3. Configure the OpenClaw plugin:
 
 ```json
 {
@@ -132,7 +188,24 @@ Add ClawForge to your OpenClaw config (`openclaw.json`):
       "sso": {
         "issuerUrl": "https://your-idp.example.com",
         "clientId": "your-oidc-client-id"
-      },
+      }
+    }
+  }
+}
+```
+
+4. Run `/clawforge-login` from your OpenClaw session to authenticate via browser.
+
+### Connect an OpenClaw Gateway
+
+Add ClawForge to your OpenClaw config (`openclaw.json`):
+
+```json
+{
+  "plugins": {
+    "clawforge": {
+      "controlPlaneUrl": "http://localhost:4100",
+      "orgId": "your-org-uuid",
       "policyCacheTtlMs": 300000,
       "heartbeatIntervalMs": 60000,
       "heartbeatFailureThreshold": 3,
@@ -143,16 +216,6 @@ Add ClawForge to your OpenClaw config (`openclaw.json`):
 }
 ```
 
-### 5. Authenticate
-
-From your OpenClaw session, run:
-
-```
-/clawforge-login
-```
-
-This opens a browser for OIDC login. After authentication, the gateway fetches your org policy and starts enforcing it.
-
 ## Configuration Reference
 
 ### Plugin Config (`ClawForgePluginConfig`)
@@ -161,8 +224,8 @@ This opens a browser for OIDC login. After authentication, the gateway fetches y
 |---|---|---|---|
 | `controlPlaneUrl` | `string` | — | URL of the ClawForge control plane API |
 | `orgId` | `string` | — | Organization UUID (fallback if not in session) |
-| `sso.issuerUrl` | `string` | — | OIDC issuer URL |
-| `sso.clientId` | `string` | — | OIDC client ID |
+| `sso.issuerUrl` | `string` | — | OIDC issuer URL (optional — only needed for SSO) |
+| `sso.clientId` | `string` | — | OIDC client ID (optional — only needed for SSO) |
 | `policyCacheTtlMs` | `number` | — | How long to cache policy locally (ms) |
 | `heartbeatIntervalMs` | `number` | — | Kill switch polling interval (ms) |
 | `heartbeatFailureThreshold` | `number` | — | Consecutive heartbeat failures before activating local kill switch |
@@ -187,18 +250,61 @@ This opens a browser for OIDC login. After authentication, the gateway fetches y
 
 ## API Reference
 
-All endpoints (except `/health` and `/api/v1/auth/exchange`) require a `Bearer` token in the `Authorization` header.
+All endpoints except those marked "Public" require a `Bearer` token in the `Authorization` header.
 
 ### Auth
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/api/v1/auth/exchange` | Public | Exchange OIDC code/token for ClawForge session |
+| `POST` | `/api/v1/auth/login` | Public | Email/password login |
+| `POST` | `/api/v1/auth/exchange` | Public | SSO token exchange (OIDC code/token) |
+| `POST` | `/api/v1/auth/enroll` | Public | Enroll with enrollment token |
+| `GET` | `/api/v1/auth/mode` | Public | Available auth methods |
+| `POST` | `/api/v1/auth/change-password` | User | Self-service password change |
 
-**Grant types:**
+**Login body:**
+```json
+{
+  "email": "admin@clawforge.local",
+  "password": "clawforge",
+  "orgId": "org-uuid"
+}
+```
+
+**Enrollment body:**
+```json
+{
+  "token": "enrollment-token-string",
+  "email": "newuser@example.com",
+  "name": "New User"
+}
+```
+
+**SSO grant types:**
 - `authorization_code` — Code + PKCE verifier (requires `X-ClawForge-Org` header)
 - `id_token` — Direct id_token validation (requires `orgId` in body)
 - `refresh_token` — Refresh an expired session
+
+**Response (all auth endpoints):**
+```json
+{
+  "accessToken": "eyJ...",
+  "refreshToken": "eyJ...",
+  "expiresAt": 1703361600000,
+  "userId": "uuid",
+  "orgId": "uuid",
+  "email": "user@example.com",
+  "roles": ["admin"]
+}
+```
+
+### Enrollment Tokens
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/enrollment-tokens/:orgId` | Admin | Create token (optional: `label`, `expiresAt`, `maxUses`) |
+| `GET` | `/api/v1/enrollment-tokens/:orgId` | Admin | List active tokens |
+| `DELETE` | `/api/v1/enrollment-tokens/:orgId/:tokenId` | Admin | Revoke a token |
 
 ### Policies
 
@@ -278,17 +384,18 @@ Status values: `approved-org`, `approved-self`, `rejected`
 
 ## Database Schema
 
-7 tables managed by Drizzle ORM:
+8 tables managed by Drizzle ORM:
 
 | Table | Purpose |
 |---|---|
-| `organizations` | Org registry with SSO config (issuer, client ID, audience) |
-| `users` | Org members with role (`admin` / `user`) |
+| `organizations` | Org registry with optional SSO config (issuer, client ID, audience) |
+| `users` | Org members with role (`admin` / `user`) and optional password hash |
 | `policies` | Versioned org policies (tools, skills, audit level, kill switch) |
 | `skill_submissions` | Skill review queue with security scan results |
 | `approved_skills` | Approved skills per org, with optional per-user scope |
 | `audit_events` | Tool calls, session lifecycle, LLM I/O events |
 | `client_heartbeats` | Last heartbeat timestamp per user per org |
+| `enrollment_tokens` | Admin-generated tokens for user onboarding |
 
 ## How It Works
 
@@ -352,18 +459,18 @@ pnpm --filter @openclaw/clawforge-admin dev    # UI on :4200
 cd server
 pnpm db:generate   # Generate migration from schema changes
 pnpm db:migrate    # Apply migrations
+pnpm db:seed       # Seed default org + admin user
 pnpm db:studio     # Open Drizzle Studio (visual DB browser)
 ```
 
 ## Known Gaps
 
 - **No tests** — unit and integration tests needed for all three packages
-- **No user CRUD** — users are auto-created on SSO login; no invite/remove/role-change API
+- **No user role management API** — users are created via seed, enrollment tokens, or SSO; no role-change or remove API yet
 - **No secret/key management** — no vault integration for API keys or credentials
 - **No audit export** — no CSV/JSON export or retention policy management
 - **No real-time push** — kill switch propagates on next heartbeat, not instantly
 - **No multi-org management UI** — schema supports it, but no org creation flow
-- **No Docker/deployment configs** — needs Dockerfile and docker-compose for production
 
 ## License
 

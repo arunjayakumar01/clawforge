@@ -9,13 +9,15 @@ The control plane (`@openclaw/clawforge-server`) is the central API that manages
 ## Table of Contents
 
 - [Setup](#setup)
+  - [Quick Start (Docker)](#quick-start-docker)
   - [Prerequisites](#prerequisites)
   - [Database](#database)
   - [Environment Variables](#environment-variables)
   - [Running](#running)
+  - [Seeding](#seeding)
   - [Migrations](#migrations)
 - [Features](#features)
-  - [1. SSO / OIDC Authentication](#1-sso--oidc-authentication)
+  - [1. Authentication](#1-authentication)
   - [2. Organization & User Management](#2-organization--user-management)
   - [3. Policy Management](#3-policy-management)
   - [4. Tool Enforcement](#4-tool-enforcement)
@@ -32,7 +34,43 @@ The control plane (`@openclaw/clawforge-server`) is the central API that manages
 
 ## Setup
 
-### Prerequisites
+### Quick Start (Docker)
+
+The fastest way to get ClawForge running locally. This starts Postgres, runs migrations, seeds a default admin user, and launches both the server and admin console.
+
+```bash
+git clone https://github.com/openclaw/clawforge.git
+cd clawforge
+docker compose up --build
+```
+
+Once running:
+
+- **Server API:** http://localhost:4100
+- **Admin Console:** http://localhost:4200
+- **Default login:** `admin@clawforge.local` / `clawforge`
+
+Log in via the API:
+
+```bash
+# Get the org ID (created by seed)
+curl http://localhost:4100/health
+# → {"status":"ok"}
+
+# Log in with email/password
+curl -X POST http://localhost:4100/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email": "admin@clawforge.local", "password": "clawforge", "orgId": "<ORG_ID>"}'
+```
+
+To customize the seed credentials, set environment variables before starting:
+
+```bash
+SUPERADMIN_EMAIL=admin@example.com SUPERADMIN_PASSWORD=s3cure \
+  docker compose up --build
+```
+
+### Prerequisites (Manual Setup)
 
 | Dependency | Version |
 |---|---|
@@ -73,6 +111,12 @@ CORS_ORIGIN="http://localhost:4200"
 ```bash
 cd server
 
+# Apply migrations
+pnpm db:migrate
+
+# Seed the database (creates default org + admin user)
+pnpm db:seed
+
 # Development (auto-reload)
 pnpm dev
 
@@ -87,6 +131,23 @@ Verify it's running:
 curl http://localhost:4100/health
 # → {"status":"ok"}
 ```
+
+### Seeding
+
+The seed script creates a default organization and superadmin user if none exist. It is safe to run multiple times (it skips if organizations already exist).
+
+```bash
+cd server
+pnpm db:seed
+```
+
+| Env Variable | Default | Description |
+|---|---|---|
+| `SUPERADMIN_EMAIL` | `admin@clawforge.local` | Admin email address |
+| `SUPERADMIN_PASSWORD` | `clawforge` | Admin password |
+| `SUPERADMIN_ORG_NAME` | `Default` | Organization name |
+
+After seeding, you can log in with email/password via `POST /api/v1/auth/login`.
 
 ### Migrations
 
@@ -111,13 +172,63 @@ The initial schema is created automatically by Drizzle on first connection. The 
 
 ## Features
 
-### 1. SSO / OIDC Authentication
+### 1. Authentication
 
-The control plane acts as a **token broker** between your Identity Provider (IdP) and OpenClaw gateways. It does not store passwords — it validates tokens from your existing IdP.
+The control plane supports two authentication methods:
+
+- **Email/password** — built-in, no external dependencies. Good for getting started and small teams.
+- **SSO / OIDC** — delegates authentication to your Identity Provider. Good for organizations with existing identity infrastructure.
+
+Both methods issue the same ClawForge JWTs (1-hour access token + 30-day refresh token).
+
+#### Email/Password Login
+
+The seed script creates a default admin with email/password credentials. Users can also be onboarded via enrollment tokens (see [Enrollment Tokens](#enrollment-tokens)).
+
+```
+POST /api/v1/auth/login
+{
+  "email": "admin@clawforge.local",
+  "password": "clawforge",
+  "orgId": "<org-uuid>"
+}
+```
+
+Additional endpoints:
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/v1/auth/mode` | Returns available auth methods (currently `["password"]`) |
+| `POST /api/v1/auth/change-password` | Self-service password change (authenticated) |
+
+#### Enrollment Tokens
+
+Admins can generate enrollment tokens to onboard new users without SSO. Users enroll with a token to create their account and receive JWTs.
+
+```
+POST /api/v1/auth/enroll
+{
+  "token": "<enrollment-token>",
+  "email": "newuser@example.com",
+  "name": "New User"
+}
+```
+
+Token management (admin only):
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/v1/enrollment-tokens/:orgId` | Create token (optional: `label`, `expiresAt`, `maxUses`) |
+| `GET` | `/api/v1/enrollment-tokens/:orgId` | List active tokens |
+| `DELETE` | `/api/v1/enrollment-tokens/:orgId/:tokenId` | Revoke a token |
+
+#### SSO / OIDC (Optional)
+
+For SSO, the control plane acts as a **token broker** between your Identity Provider (IdP) and OpenClaw gateways.
 
 **Supported IdPs:** Any OIDC-compliant provider — Okta, Auth0, Microsoft Entra ID (Azure AD), Google Workspace, Keycloak, etc.
 
-#### How It Works
+**How It Works:**
 
 ```
 User runs /clawforge-login in OpenClaw
@@ -150,7 +261,7 @@ Upserts user record, issues ClawForge JWTs
 Plugin stores session locally (~/.clawforge/session.json)
 ```
 
-#### Three Grant Types
+**SSO Grant Types:**
 
 | Grant | Use Case | Required Fields |
 |---|---|---|
@@ -158,14 +269,14 @@ Plugin stores session locally (~/.clawforge/session.json)
 | `id_token` | Direct token validation (headless/CI) | `idToken`, `orgId` |
 | `refresh_token` | Renew expired session | `refreshToken` |
 
-#### Token Lifetimes
+**Token Lifetimes:**
 
 | Token | Lifetime |
 |---|---|
 | Access token | 1 hour |
 | Refresh token | 30 days |
 
-#### IdP Configuration
+**IdP Configuration:**
 
 The control plane discovers your IdP's endpoints automatically via `/.well-known/openid-configuration`. You only need to provide:
 
@@ -174,8 +285,6 @@ The control plane discovers your IdP's endpoints automatically via `/.well-known
 3. **Audience** (optional) — if your IdP uses a custom audience claim
 
 These are stored in the `organizations.sso_config` column.
-
-#### OIDC Discovery & JWKS Caching
 
 Both the discovery document and JWKS are cached in-memory for 1 hour, reducing latency and IdP load for repeated token verifications.
 
@@ -197,7 +306,10 @@ Organizations are the top-level tenant. Each org has:
 - A name
 - SSO configuration (issuer URL, client ID, optional audience)
 
-Currently, orgs must be created directly in the database:
+Organizations can be created via:
+
+- **Seed script** — `pnpm db:seed` creates a default org and admin user
+- **Direct SQL** — for custom SSO configuration:
 
 ```sql
 INSERT INTO organizations (name, sso_config)
@@ -209,7 +321,7 @@ VALUES (
 
 #### Users
 
-Users are auto-created on first SSO login. The `users` table tracks:
+Users can be created via seed, enrollment tokens, or SSO login. The `users` table tracks:
 
 | Field | Description |
 |---|---|
@@ -591,7 +703,8 @@ organizations (1) ──┬── (N) users
                     ├── (N) skill_submissions
                     ├── (N) approved_skills
                     ├── (N) audit_events
-                    └── (N) client_heartbeats
+                    ├── (N) client_heartbeats
+                    └── (N) enrollment_tokens
 ```
 
 ### Tables
@@ -613,8 +726,9 @@ organizations (1) ──┬── (N) users
 | `id` | UUID (PK) | Auto-generated |
 | `org_id` | UUID (FK → organizations) | |
 | `email` | TEXT | Unique per org |
-| `name` | TEXT | From OIDC claims |
+| `name` | TEXT | From OIDC claims or enrollment |
 | `role` | TEXT | `admin` or `user` |
+| `password_hash` | TEXT | Bcrypt hash (null for SSO-only users) |
 | `last_seen_at` | TIMESTAMPTZ | Updated on auth |
 | `created_at` | TIMESTAMPTZ | |
 
@@ -698,6 +812,23 @@ Partitioned by range on `timestamp` (after migration 0001).
 
 Unique index: `(org_id, user_id)` — upserted on each heartbeat.
 
+#### `enrollment_tokens`
+
+| Column | Type | Description |
+|---|---|---|
+| `id` | UUID (PK) | Auto-generated |
+| `org_id` | UUID (FK → organizations) | |
+| `token` | TEXT (unique) | Base64url token string |
+| `label` | TEXT | Optional human-readable label |
+| `expires_at` | TIMESTAMPTZ | Optional expiry |
+| `max_uses` | INT | Optional usage cap |
+| `used_count` | INT | Current usage count (default 0) |
+| `created_by` | UUID (FK → users) | Admin who created the token |
+| `revoked_at` | TIMESTAMPTZ | Set when revoked |
+| `created_at` | TIMESTAMPTZ | |
+
+Indexes: `(org_id)`, unique on `(token)`
+
 ---
 
 ## API Reference
@@ -712,11 +843,33 @@ No authentication required.
 
 ### Authentication
 
-| Method | Path | Auth | Body |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/api/v1/auth/exchange` | None | See grant types below |
+| `POST` | `/api/v1/auth/login` | None | Email/password login |
+| `POST` | `/api/v1/auth/exchange` | None | SSO token exchange (see grant types below) |
+| `POST` | `/api/v1/auth/enroll` | None | Enroll with enrollment token |
+| `GET` | `/api/v1/auth/mode` | None | Available auth methods |
+| `POST` | `/api/v1/auth/change-password` | User | Self-service password change |
 
-**Authorization Code:**
+**Email/Password Login:**
+```json
+{
+  "email": "admin@clawforge.local",
+  "password": "clawforge",
+  "orgId": "org-uuid"
+}
+```
+
+**Enrollment:**
+```json
+{
+  "token": "enrollment-token-string",
+  "email": "newuser@example.com",
+  "name": "New User"
+}
+```
+
+**SSO — Authorization Code:**
 ```json
 {
   "grantType": "authorization_code",
@@ -727,7 +880,7 @@ No authentication required.
 ```
 Header: `X-ClawForge-Org: <org-uuid>`
 
-**ID Token (headless):**
+**SSO — ID Token (headless):**
 ```json
 {
   "grantType": "id_token",
@@ -744,7 +897,7 @@ Header: `X-ClawForge-Org: <org-uuid>`
 }
 ```
 
-**Response (all grant types):**
+**Response (all auth endpoints):**
 ```json
 {
   "accessToken": "eyJ...",
@@ -756,6 +909,14 @@ Header: `X-ClawForge-Org: <org-uuid>`
   "roles": ["admin"]
 }
 ```
+
+### Enrollment Tokens
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/v1/enrollment-tokens/:orgId` | Admin | Create enrollment token |
+| `GET` | `/api/v1/enrollment-tokens/:orgId` | Admin | List active tokens |
+| `DELETE` | `/api/v1/enrollment-tokens/:orgId/:tokenId` | Admin | Revoke a token |
 
 ### Policies
 
@@ -863,11 +1024,12 @@ Client sessions are stored at `~/.clawforge/session.json`. Ensure appropriate fi
 - [ ] Set a strong `JWT_SECRET`
 - [ ] Configure `CORS_ORIGIN` to admin domain only
 - [ ] Use PostgreSQL with SSL
+- [ ] Run `pnpm db:migrate` and `pnpm db:seed` (or use Docker)
 - [ ] Run audit partitioning migration (`0001_audit_partitioning.sql`)
 - [ ] Set up partition creation cron (monthly)
 - [ ] Put control plane behind TLS reverse proxy
-- [ ] Create org record in database with SSO config
-- [ ] Configure OpenClaw plugin with `controlPlaneUrl` and SSO settings
-- [ ] Test `/clawforge-login` flow end to end
+- [ ] Set up authentication (email/password via seed, or SSO via org `sso_config`)
+- [ ] Configure OpenClaw plugin with `controlPlaneUrl`
+- [ ] Test login flow end to end (email/password or SSO)
 - [ ] Set appropriate `heartbeatIntervalMs` and `heartbeatFailureThreshold`
 - [ ] Monitor `/health` endpoint
