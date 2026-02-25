@@ -25,6 +25,7 @@ import { buildSkillsEnterpriseConfig } from "./policy/skill-filter.js";
 import { AuditLogger } from "./audit/audit-logger.js";
 import { KillSwitchManager } from "./heartbeat/kill-switch.js";
 import { ConnectionStateManager, type ConnectionStatus } from "./connection/connection-state.js";
+import { SSEClient } from "./events/sse-client.js";
 
 /**
  * Shared state used by the status command handler.
@@ -276,11 +277,30 @@ async function initializeClawForge(
   });
   killSwitchMgr.start();
 
+  // --- 10b. Start SSE client for real-time push (if enabled) ---
+  const sseEnabled = pluginConfig.sseEnabled !== false; // default true
+  let sseClient: SSEClient | null = null;
+
+  if (sseEnabled && pluginConfig.controlPlaneUrl) {
+    sseClient = new SSEClient({
+      config: pluginConfig,
+      session,
+      enforcerState,
+      onPolicyRefreshNeeded: () => {
+        refreshPolicy().catch(() => {});
+      },
+      logger,
+    });
+    sseClient.start();
+    logger.info("SSE real-time event stream enabled");
+  }
+
   // --- 11. Register gateway_stop hook to flush audit ---
   api.on("gateway_stop", async () => {
     killSwitchMgr.stop();
+    sseClient?.stop();
     await auditLogger.stop();
-    logger.info("ClawForge shutdown: audit events flushed, heartbeat stopped");
+    logger.info("ClawForge shutdown: audit events flushed, heartbeat stopped, SSE disconnected");
   });
 
   logger.info(

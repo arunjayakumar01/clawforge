@@ -71,6 +71,8 @@ export type ClawForgePluginConfig = {
   auditFlushIntervalMs?: number;
   offlineMode?: OfflineMode; // default: 'block'
   maxAuditBufferSize?: number; // default: 10000
+  /** Enable real-time SSE connection for instant kill switch and policy updates. Defaults to true. */
+  sseEnabled?: boolean;
 };
 
 export type SessionTokens = {
