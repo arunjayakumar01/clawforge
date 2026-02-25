@@ -28,6 +28,25 @@ const ExchangeBodySchema = z.discriminatedUnion("grantType", [
 ]);
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
+  // Route-specific rate limits for auth endpoints (#40)
+  const authRateLimit = {
+    config: {
+      rateLimit: {
+        max: 10,
+        timeWindow: "1 minute",
+      },
+    },
+  };
+
+  const exchangeRateLimit = {
+    config: {
+      rateLimit: {
+        max: 30,
+        timeWindow: "1 minute",
+      },
+    },
+  };
+
   /**
    * POST /api/v1/auth/exchange
    * Exchange an IdP token for a ClawForge session token.
